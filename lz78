@@ -1,0 +1,107 @@
+#!/usr/bin/env python2.7
+# -*- coding: utf-8 -*-
+
+def compress(uncompressed_file):
+  text = uncompressed_file.read()
+  compressed_phrase_indexes = []
+
+  base_phrase = {
+    "index": 0,
+    "index_length": 0,
+    "parent_index": 0,
+    "trailing_character": ""
+  }
+  phrase_nodes_by_phrase = {"": base_phrase}
+  phrase_nodes_by_index = [base_phrase]
+  next_index = 1
+
+  while len(text) > 0:
+    # Find phrase 1 character longer than one in tree.
+    # N.B. Or a phrase equal to the length of the remaining text.
+    phrase_length = 1
+    while text[:phrase_length] in phrase_nodes_by_phrase and phrase_length < len(text):
+      phrase_length += 1
+    phrase = text[:phrase_length]
+
+    parent_phrase_node = phrase_nodes_by_phrase[phrase[:-1]]
+    phrase_node = {
+      "index": next_index,
+      "index_length": 0,
+      "parent_index": parent_phrase_node["index"],
+      "trailing_character": phrase[-1]
+    }
+    if phrase_node["index"] > 0:
+      phrase_node["index_length"] = int(math.ceil(math.log(phrase_node["index"], 10)))
+    phrase_nodes_by_phrase[phrase] = phrase_node
+    phrase_nodes_by_index.append(phrase_node)
+    compressed_phrase_indexes.append(next_index)
+
+    text = text[phrase_length:]
+    next_index += 1
+
+  # Output compressed text.
+  compressed = ""
+  for compressed_phrase_index in compressed_phrase_indexes:
+    phrase_node = phrase_nodes_by_index[compressed_phrase_index]
+    #compressed += "[" + str(phrase_node["index_length"]) + "]"
+    if phrase_node["index_length"] > 0:
+      #compressed += "[" +  str(phrase_node["parent_index"]).zfill(phrase_node["index_length"]) + "]"
+      compressed += str(phrase_node["parent_index"]).zfill(phrase_node["index_length"])
+    compressed += str(phrase_node["trailing_character"])
+
+  print compressed
+
+def decompress(compressed_file):
+  compressed = compressed_file.read()
+  text = ""
+
+  base_phrase = {
+    "index": 0,
+    "index_length": 0,
+    "parent_index": 0,
+    "trailing_character": ""
+  }
+  phrase_nodes_by_index = [base_phrase]
+  next_index = 1
+
+  while len(compressed) > 0:
+    index_length = int(math.ceil(math.log(next_index, 10)))
+    parent_index = 0
+    if index_length > 0:
+      parent_index = int(compressed[:index_length])
+    trailing_character = compressed[index_length]
+
+    parent_phrase_node = phrase_nodes_by_index[parent_index]
+    phrase_node = {
+      "index": next_index,
+      "index_length": index_length,
+      "parent_index": parent_index,
+      "trailing_character": trailing_character
+    }
+    phrase_nodes_by_index.append(phrase_node)
+    reversed_phrase = trailing_character
+    loop_parent_index = parent_index
+    while loop_parent_index != 0:
+      parent_node = phrase_nodes_by_index[loop_parent_index]
+      reversed_phrase += parent_node["trailing_character"]
+      loop_parent_index = parent_node["parent_index"]
+    text += reversed_phrase[::-1]
+    compressed = compressed[index_length+1:]
+    next_index += 1
+
+  print text
+
+if __name__ == "__main__":
+  import os, sys, argparse, math
+
+  ArgP = argparse.ArgumentParser(description="Compressor/decompressor for files using Lempel-Ziv 1978 (LZ78).")
+  ArgP.add_argument("-c", "--compress", nargs='?', type=argparse.FileType('rb'), help="File to compress.")
+  ArgP.add_argument("-d", "--decompress", nargs='?', type=argparse.FileType('rb'), help="File to decompress.")
+  ArgP.add_argument("-o", "--output", nargs='?', help="File to decompress.")
+  Args = ArgP.parse_args()
+
+  if Args.compress:
+    compress(Args.compress)
+
+  if Args.decompress:
+    decompress(Args.decompress)

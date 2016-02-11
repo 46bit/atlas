@@ -1,0 +1,257 @@
+#!/usr/bin/env python2.7
+# -*- coding: utf-8 -*-
+
+# @TODO: make abstract?
+class LZWUtility(object):
+  def __init__(self, debug_mode, input_stream, output_stream, debug_stream):
+    self.debug_mode = debug_mode
+    self.input_stream = input_stream
+    self.output_stream = output_stream
+    self.debug_stream = debug_stream
+
+    self.node_graph = LZWNodeGraph()
+
+  def input(self, l):
+    s = self.input_stream.read(l)
+    self.debug_input(s)
+    return s
+
+  def output(self, o):
+    self.output_stream.write(o)
+    self.debug_output(o)
+
+  def debug(self, d):
+    self.debug_stream.write(d)
+
+  def debug_input(self, i):
+    if self.debug_mode:
+      # (input INPUT:IN:HEX)
+      self.debug("(input 0x{} {})\n".format(self.hex_from_str(i), repr(i)))
+
+  def debug_output(self, o):
+    if self.debug_mode:
+      # (output OUTPUT:IN:HEX)
+      self.debug("(output 0x{})\n".format(self.hex_from_str(o)))
+
+  def debug_node(self, node):
+    if self.debug_mode:
+      # (node 0xINDEX:IN:HEX TRAILING_CHAR)
+      self.debug("(node 0x{} {})\n".format(self.hex_from_int(node.index), repr(node.trailing)))
+
+  def debug_report(self):
+    if self.debug_mode:
+      self.debug("(nodecount {})\n".format(len(self.node_graph.nodes_by_index)))
+
+  def debug_graph_nodes(self):
+    for i in self.node_graph.nodes_by_index:
+      node = self.node_graph.nodes_by_index[i]
+      self.debug_node(node)
+
+  def int_from_str(self, s):
+    return int(s.encode('hex'), 16)
+
+  def str_from_int(self, n, byte_len, endianess="big"):
+    h = "%x" % n
+    s = ('0'*(len(h) % 2) + h).zfill(byte_len*2).decode("hex")
+    return s if endianess == "big" else s[::-1]
+
+  def str_len_from_int(self, i):
+    return int(math.ceil(math.log(i, 256)))
+
+  def hex_from_str(self, s):
+    return ":".join(c.encode("hex").upper() for c in s)
+
+  def hex_from_int(self, i):
+    return self.hex_from_str(self.str_from_int(i, 1))
+
+class LZWCompress(LZWUtility):
+  EXISTING_NODE = 1
+  NEW_NODE = 2
+  FLUSH_BEFORE_EOF = 3
+
+  def run(self):
+    self.node = self.node_graph.control_nodes["ROOT"]
+    while True:
+      trailing = self.input(1)
+      if len(trailing) == 0:
+        # If at the end of input, flush the current node then output EOF. output the EOF and exit.
+        self.state = self.FLUSH_BEFORE_EOF
+      else:
+        # Find relevant child of node.
+        self.descend_graph(trailing)
+
+
+      self.debug_node(self.node)
+
+      if self.state == self.EXISTING_NODE:
+        continue
+
+      # Tokenize node and output.
+      if not self.node.is_root():
+        token = self.tokenize_node(self.node)
+        self.output(token)
+
+      if self.state == self.NEW_NODE:
+        self.node = self.node_graph.control_nodes["ROOT"]
+      elif self.state == self.FLUSH_BEFORE_EOF:
+        # End of input has been reached and the current node flushed.
+        # Output EOF and exit.
+        self.node = self.node_graph.control_nodes["EOF"]
+        token = self.tokenize_node(self.node)
+        self.output(token)
+        self.debug_report()
+        break
+
+      if self.debug_mode: self.debug("\n\n")
+
+  def descend_graph(self, trailing):
+    child_node = self.node.child(trailing)
+    # If this node has been seen before, we want to return the node on the
+    # graph and return it. Thus allowing appending another trailing value,
+    # or etc.
+    if self.node_graph.has_node(child_node):
+      self.node = self.node_graph.get_node(child_node)
+      self.state = self.EXISTING_NODE
+    else:
+      # If this node has not been seen before, we want to add it to the graph
+      # and return it for output.
+      self.node_graph.put_node(child_node)
+      self.node = child_node
+      self.state = self.NEW_NODE
+
+  def tokenize_node(self, node):
+    index_len = self.str_len_from_int(self.node_graph.node_count)
+    return self.str_from_int(self.node.parent.index, index_len) + node.trailing
+
+class LZWDecompress(LZWUtility):
+  def run(self):
+    while True:
+      token_len = self.str_len_from_int(self.node_graph.node_count) + 1
+      #self.debug(str(token_len) + "\n")
+      token = self.input(token_len)
+      if len(token) == 0:
+        raise ValueError("Input ended unexpectedly!")
+
+      # Detokenize into node.
+      # @TODO: if only looking at children of ROOT, we'll never detect EOF.
+      node_index = self.int_from_str(token[:-1])
+      if not self.node_graph.has_index(node_index):
+        raise LookupError("Parent node with index {} 0x{} not found!".format(node_index, self.hex_from_int(node_index)))
+      parent_graph_node = self.node_graph.get_by_index(node_index)
+      node = parent_graph_node.child(token[-1])
+      if self.node_graph.has_node(node):
+        node = self.node_graph.get_node(node)
+      else:
+        self.node_graph.put_node(node)
+
+      if node.is_eof():
+        break
+
+      self.output(node.phrase())
+
+class LZWNodeGraph(object):
+  def __init__(self):
+    self.nodes_by_index = {}
+    self.nodes_by_parentindex_trailing = {}
+    self.node_count = 0
+    self.control_nodes = {}
+
+    self.startDictionary()
+
+  def startDictionary(self):
+    # Root node.
+    # Parent to all non-control nodes.
+    node = RootNode()
+    self.put_node(node)
+    self.control_nodes["ROOT"] = node
+
+    # End Of File node.
+    # Emitted to indicate compressed stream ends immediately.
+    node = EOFNode()
+    self.put_node(node)
+    self.control_nodes["EOF"] = node
+
+    # The first compressed phrase is two characters long, as we preset early indexes to bytes 0-255.
+    for i in range(256):
+      node = self.control_nodes["ROOT"].child(chr(i))
+      self.put_node(node)
+
+  def has_index(self, index):
+    return index in self.nodes_by_index
+
+  def get_by_index(self, index):
+    return self.nodes_by_index[index]
+
+  def has_node(self, node):
+    return (node.parent.index, node.trailing) in self.nodes_by_parentindex_trailing
+
+  def get_node(self, node):
+    return self.nodes_by_parentindex_trailing[(node.parent.index, node.trailing)]
+
+  def put_node(self, node):
+    node.index = self.node_count
+    self.nodes_by_index[node.index] = node
+    if node.parent:
+      self.nodes_by_parentindex_trailing[(node.parent.index, node.trailing)] = node
+    self.node_count += 1
+
+class PhraseNode(object):
+  def __init__(self, trailing, parent):
+    self.trailing = trailing
+    self.index = None
+    self.parent = parent
+
+  def phrase(self):
+    phrase_reversed = self.trailing
+    next_parent = self
+    while next_parent.parent and next_parent.parent.index != next_parent.index:
+      next_parent =  next_parent.parent
+      phrase_reversed += next_parent.trailing
+    return phrase_reversed[::-1]
+
+  def child(self, trailing):
+    return PhraseNode(trailing, self)
+
+  def is_eof(self):
+    return False
+
+  def is_root(self):
+    return False
+
+class EOFNode(PhraseNode):
+  def __init__(self):
+    super(EOFNode, self).__init__("\0", self)
+
+  def is_eof(self):
+    return True
+
+class RootNode(PhraseNode):
+  def __init__(self):
+    super(RootNode, self).__init__("", False)
+
+  def is_root(self):
+    return True
+
+if __name__ == "__main__":
+  import os, sys, argparse, math
+
+  parser = argparse.ArgumentParser(description="Compression utility based on Lempel-Ziv-Welsh | https://46b.it")
+  parser.add_argument('action', metavar="ACTION", choices=['compress', 'decompress', 'list_nodes'], help="compress | decompress")
+  parser.add_argument('input', metavar="INPUT", nargs='?', default=sys.stdin, type=argparse.FileType('rb'), help='Path to input.')
+  parser.add_argument("-o", metavar="OUTPUT", nargs='?', default=sys.stdout, type=argparse.FileType('wb'), help="Path to output.")
+  parser.add_argument("--verbose", action="store_true", help="Print compression steps to stderr.")
+  parser.add_argument('--version', action='version', version='%(prog)s 1.0')
+  args = parser.parse_args()
+
+  if args.action == "compress":
+    compress = LZWCompress(args.verbose, args.input, args.o, sys.stderr)
+    compress.run()
+  elif args.action == "decompress":
+    decompress = LZWDecompress(args.verbose, args.input, args.o, sys.stderr)
+    decompress.run()
+  elif args.action == "list_nodes":
+    utility = LZWUtility(True, args.input, args.o, sys.stderr)
+    utility.debug_graph_nodes()
+  else:
+    raise "Unknown action."
+#_+
